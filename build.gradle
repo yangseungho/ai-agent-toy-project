@@ -1,0 +1,41 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.5'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+
+java {
+    // 요구사항: Java 21 사용
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // REST API 및 Spring Boot 기본 기능
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+
+    // JSON 직렬화/역직렬화 (spring-boot-starter-web 에 이미 포함되어 있지만 명시)
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+
+    // Lombok (보일러플레이트 감소)
+    compileOnly 'org.projectlombok:lombok:1.18.34'
+    annotationProcessor 'org.projectlombok:lombok:1.18.34'
+    testCompileOnly 'org.projectlombok:lombok:1.18.34'
+    testAnnotationProcessor 'org.projectlombok:lombok:1.18.34'
+
+    // 테스트: JUnit5 + Mockito (spring-boot-starter-test 에 모두 포함)
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

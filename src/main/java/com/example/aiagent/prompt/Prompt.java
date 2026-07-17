@@ -1,58 +1,74 @@
 package com.example.aiagent.prompt;
 
+import com.example.aiagent.memory.ChatMessage;
 import lombok.Getter;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * LLM 에 전달할 Prompt.
  *
- * <p>Planner 가 모은 정보(Tool 결과)를 사람이 읽을 수 있는 하나의 텍스트로 조립한 것이다.
- * 실제 LLM 이라면 이 텍스트를 입력으로 받아 답변을 생성한다.</p>
- *
- * <p>{@code reflectionNote} 는 Reflection 단계에서 채워진다. Validation 이 실패했을 때
- * "이런 점을 지켜서 다시 답하라"는 교정 지시가 담기며, FakeLLM 은 이 값이 있으면
- * 교정된 답변을 반환한다.</p>
+ * <p>실제 Messages API 의 구조와 1:1로 대응된다.</p>
+ * <ul>
+ *     <li>{@link #systemInstruction} → system 파라미터 (역할/규칙)</li>
+ *     <li>{@link #history} → 이전 대화 턴 (Memory 에서 로드)</li>
+ *     <li>{@link #userMessage} → 이번 턴 사용자 메시지 (Tool 로 수집한 근거 + 질문)</li>
+ *     <li>{@link #reflectionNote} → Validation 실패 시 Reflection 이 덧붙이는 교정 지시</li>
+ * </ul>
  */
 @Getter
 public class Prompt {
 
-    /** 시스템 지시문 (역할/규칙) */
     private final String systemInstruction;
-
-    /** 사용자 질문 */
-    private final String question;
-
-    /** Tool 들이 수집한 정보를 정리한 컨텍스트 */
-    private final String contextInfo;
-
-    /** Reflection 교정 지시 (없으면 null) */
+    private final List<ChatMessage> history;
+    private final String userMessage;
     private final String reflectionNote;
 
-    public Prompt(String systemInstruction, String question, String contextInfo, String reflectionNote) {
+    public Prompt(String systemInstruction, List<ChatMessage> history, String userMessage, String reflectionNote) {
         this.systemInstruction = systemInstruction;
-        this.question = question;
-        this.contextInfo = contextInfo;
+        this.history = List.copyOf(history);
+        this.userMessage = userMessage;
         this.reflectionNote = reflectionNote;
     }
 
-    /** Reflection 교정 지시가 포함되어 있는지 여부. */
     public boolean hasReflectionNote() {
         return reflectionNote != null && !reflectionNote.isBlank();
     }
 
-    /** 기존 Prompt 에 Reflection 교정 지시만 추가한 새 Prompt 를 만든다. (불변 객체 유지) */
+    /** 교정 지시만 추가한 새 Prompt 를 만든다 (불변 유지). */
     public Prompt withReflectionNote(String note) {
-        return new Prompt(systemInstruction, question, contextInfo, note);
+        return new Prompt(systemInstruction, history, userMessage, note);
     }
 
-    /** LLM 입력으로 쓸 최종 텍스트로 합친다. */
+    /**
+     * 이번 턴에 LLM 으로 보낼 최종 사용자 메시지.
+     * Reflection 지시가 있으면 뒤에 덧붙인다.
+     */
+    public String effectiveUserMessage() {
+        if (!hasReflectionNote()) {
+            return userMessage;
+        }
+        return userMessage + "\n\n[이전 답변 교정 지시]\n" + reflectionNote;
+    }
+
+    /** 디버깅/로그용 전체 텍스트. */
     public String toText() {
         StringBuilder sb = new StringBuilder();
         sb.append("[SYSTEM]\n").append(systemInstruction).append("\n\n");
-        sb.append("[CONTEXT]\n").append(contextInfo).append("\n\n");
-        sb.append("[QUESTION]\n").append(question).append("\n");
-        if (hasReflectionNote()) {
-            sb.append("\n[REFLECTION]\n").append(reflectionNote).append("\n");
+        if (!history.isEmpty()) {
+            sb.append("[HISTORY]\n");
+            for (ChatMessage message : history) {
+                sb.append(message.role()).append(": ").append(message.content()).append("\n");
+            }
+            sb.append("\n");
         }
+        sb.append("[USER]\n").append(effectiveUserMessage());
         return sb.toString();
+    }
+
+    /** 빈 히스토리 리스트 헬퍼. */
+    public static List<ChatMessage> noHistory() {
+        return new ArrayList<>();
     }
 }

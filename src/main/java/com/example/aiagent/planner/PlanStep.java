@@ -4,40 +4,37 @@ import lombok.Getter;
 
 /**
  * 실행 계획의 한 단계.
- *
- * <p>두 종류 중 하나이다.</p>
- * <ul>
- *     <li>{@code CALL_TOOL} : 특정 Tool 을 호출한다 ({@link #toolName} 가 채워짐)</li>
- *     <li>{@code FINISH}    : 더 이상 호출할 Tool 이 없으니 답변 생성 단계로 넘어간다</li>
- * </ul>
  */
 @Getter
 public class PlanStep {
 
-    /** 단계의 종류 */
     public enum Action {
+        /** 특정 Tool 을 호출한다 */
         CALL_TOOL,
+        /** 더 이상 호출할 Tool 이 없다 → 답변 생성 단계로 */
         FINISH
     }
 
     private final Action action;
 
-    /** action 이 CALL_TOOL 일 때 호출할 Tool 이름 (FINISH 면 null) */
+    /** CALL_TOOL 일 때 호출할 Tool 이름 (FINISH 면 null) */
     private final String toolName;
 
-    private PlanStep(Action action, String toolName) {
+    /** 이 단계를 선택한 이유 (관측/교육용) */
+    private final String reason;
+
+    private PlanStep(Action action, String toolName, String reason) {
         this.action = action;
         this.toolName = toolName;
+        this.reason = reason;
     }
 
-    /** Tool 호출 단계를 만든다. */
-    public static PlanStep callTool(String toolName) {
-        return new PlanStep(Action.CALL_TOOL, toolName);
+    public static PlanStep callTool(String toolName, String reason) {
+        return new PlanStep(Action.CALL_TOOL, toolName, reason);
     }
 
-    /** 종료(답변 생성) 단계를 만든다. */
-    public static PlanStep finish() {
-        return new PlanStep(Action.FINISH, null);
+    public static PlanStep finish(String reason) {
+        return new PlanStep(Action.FINISH, null, reason);
     }
 
     public boolean isFinish() {
@@ -46,6 +43,6 @@ public class PlanStep {
 
     @Override
     public String toString() {
-        return isFinish() ? "FINISH" : "CALL_TOOL(" + toolName + ")";
+        return isFinish() ? "FINISH(" + reason + ")" : "CALL_TOOL(" + toolName + " — " + reason + ")";
     }
 }

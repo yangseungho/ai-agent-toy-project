@@ -3,80 +3,133 @@ package com.example.aiagent.planner;
 import com.example.aiagent.dto.AgentContext;
 import com.example.aiagent.intent.Intent;
 import com.example.aiagent.tool.ToolNames;
+import com.example.aiagent.tool.ToolResult;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
- * Planner.
+ * Planner — 어떤 Tool 을 어떤 순서로 호출할지 결정한다.
  *
- * <p>Planner 는 두 가지 역할을 한다.</p>
- * <ol>
- *     <li>{@link #plan(AgentContext)} : 질문/Intent 를 분석해 어떤 Tool 들을
- *         호출할지 초기 실행 계획({@link ExecutionPlan})을 세운다.</li>
- *     <li>{@link #decideNextStep(AgentContext)} : Agent Loop 안에서 매 반복마다
- *         "지금까지 모인 결과"를 보고 다음에 무엇을 할지 결정한다. 아직 실행하지 않은
- *         필요한 Tool 이 있으면 그 Tool 을, 모두 끝났으면 FINISH 를 반환한다.</li>
- * </ol>
+ * <p>핵심 두 가지.</p>
  *
- * <p>요구사항대로 Planner 는 한 번만 호출되지 않고, Tool 결과를 받은 뒤 반복적으로
- * 다음 행동을 결정한다.</p>
+ * <p><b>1) 복합 의도 처리</b><br>
+ * 감지된 <b>모든</b> 의도에 필요한 Tool 을 합집합(union)으로 모은다.
+ * "취소하면 쿠폰 돌려받나요?" → intents=[ORDER_STATUS, SHIPPING, REFUND, COUPON]
+ * → 주문/배송/쿠폰/정책을 모두 확인해야 정확히 답할 수 있다.</p>
+ *
+ * <p><b>2) 결과에 따른 적응</b><br>
+ * Planner 는 한 번만 호출되지 않는다. Tool 결과를 받은 뒤 다시 호출되어
+ * 다음 행동을 정한다({@link #decideNextStep}). 예를 들어 OrderTool 이 주문을
+ * 찾지 못했다면 orderId 가 없으므로 ShippingTool/CouponTool 은 호출해봐야
+ * 의미가 없다 → 건너뛰고 종료한다.</p>
  */
 @Component
 public class Planner {
 
     /**
-     * Intent 에 따라 이 Agent 가 실행해야 할 Tool 목록(순서 포함)을 정의한다.
-     * 교육용이므로 Rule 로 단순하게 매핑한다.
+     * Tool 호출 순서(고정).
+     *
+     * <p>OrderTool 이 반드시 먼저다. ShippingTool/CouponTool 은 OrderTool 이 찾아낸
+     * orderId 가 있어야 조회할 수 있기 때문이다 — Tool 간 데이터 의존성이 존재한다.</p>
      */
-    private List<String> requiredTools(Intent intent) {
-        List<String> tools = new ArrayList<>();
-        switch (intent) {
-            case REFUND:
-                // "취소하면 쿠폰 돌려받나?" → 주문 → 배송 → 정책(RAG) → 쿠폰 순으로 확인
-                tools.add(ToolNames.ORDER);
-                tools.add(ToolNames.SHIPPING);
-                tools.add(ToolNames.POLICY_RAG);
-                tools.add(ToolNames.COUPON);
-                break;
-            case SHIPPING:
-                // 배송 문의 → 주문 → 배송 확인
-                tools.add(ToolNames.ORDER);
-                tools.add(ToolNames.SHIPPING);
-                break;
-            case ACCOUNT:
-            case UNKNOWN:
-            default:
-                // 별도 Tool 없이 바로 답변 생성
-                break;
+    private static final List<String> TOOL_ORDER = List.of(
+            ToolNames.ORDER,
+            ToolNames.SHIPPING,
+            ToolNames.COUPON,
+            ToolNames.POLICY_RAG
+    );
+
+    /**
+     * 의도별로 필요한 Tool 을 합집합으로 계산한다.
+     */
+    public List<String> requiredTools(List<Intent> intents) {
+        Set<String> required = new LinkedHashSet<>();
+
+        if (intents != null) {
+            for (Intent intent : intents) {
+                required.addAll(toolsFor(intent));
+            }
         }
-        return tools;
+
+        // 정해진 실행 순서대로 정렬해 반환한다.
+        List<String> ordered = new ArrayList<>();
+        for (String toolName : TOOL_ORDER) {
+            if (required.contains(toolName)) {
+                ordered.add(toolName);
+            }
+        }
+        return ordered;
     }
 
-    /** 초기 실행 계획을 세운다. */
+    /** 의도 하나가 필요로 하는 Tool 들. */
+    private List<String> toolsFor(Intent intent) {
+        return switch (intent) {
+            // 주문 확인
+            case ORDER_STATUS -> List.of(ToolNames.ORDER);
+
+            // 배송 문의 → 주문을 찾아야 운송장을 조회할 수 있다
+            case SHIPPING -> List.of(ToolNames.ORDER, ToolNames.SHIPPING);
+
+            // 환불/취소 → 취소 가능 여부는 '배송 상태'와 '환불 정책'에 달려 있다
+            case REFUND -> List.of(ToolNames.ORDER, ToolNames.SHIPPING, ToolNames.POLICY_RAG);
+
+            // 쿠폰 → 어떤 주문의 쿠폰인지 알아야 하고, 복구 여부는 정책 문서에 있다
+            case COUPON -> List.of(ToolNames.ORDER, ToolNames.COUPON, ToolNames.POLICY_RAG);
+
+            // 정책 자체 문의 → 문서 검색(RAG)만 하면 된다
+            case POLICY -> List.of(ToolNames.POLICY_RAG);
+
+            // 별도 조회 없이 바로 답변
+            case ACCOUNT, UNKNOWN -> List.of();
+        };
+    }
+
+    /** 초기 실행 계획(청사진)을 세운다. */
     public ExecutionPlan plan(AgentContext context) {
         ExecutionPlan executionPlan = new ExecutionPlan();
-        for (String toolName : requiredTools(context.getIntent())) {
-            executionPlan.addStep(PlanStep.callTool(toolName));
+
+        for (String toolName : requiredTools(context.intents())) {
+            executionPlan.addStep(PlanStep.callTool(toolName, "의도 " + context.intents() + " 처리에 필요"));
         }
-        // 마지막은 항상 답변 생성(FINISH)
-        executionPlan.addStep(PlanStep.finish());
+        executionPlan.addStep(PlanStep.finish("수집한 근거로 답변 생성"));
         return executionPlan;
     }
 
     /**
-     * Agent Loop 에서 호출된다. 지금까지의 결과를 보고 다음 단계를 결정한다.
-     *
-     * <p>아직 실행되지 않은 '필요한 Tool' 중 가장 앞의 것을 반환하고,
-     * 모두 실행되었다면 FINISH 를 반환한다.</p>
+     * Agent Loop 가 매 반복마다 호출한다. 지금까지 모인 결과를 보고 다음 행동을 결정한다.
      */
     public PlanStep decideNextStep(AgentContext context) {
-        for (String toolName : requiredTools(context.getIntent())) {
-            if (!context.hasToolResult(toolName)) {
-                return PlanStep.callTool(toolName);
+        for (String toolName : requiredTools(context.intents())) {
+
+            if (context.hasToolResult(toolName)) {
+                continue; // 이미 실행함
             }
+
+            // 결과 기반 적응: 주문을 못 찾았으면 주문에 종속된 Tool 은 건너뛴다.
+            if (requiresOrderId(toolName) && !hasResolvedOrderId(context)) {
+                continue;
+            }
+
+            return PlanStep.callTool(toolName, "아직 확인하지 않은 정보");
         }
-        return PlanStep.finish();
+
+        return PlanStep.finish("필요한 정보를 모두 확인함");
+    }
+
+    /** 이 Tool 이 orderId 에 의존하는가? */
+    private boolean requiresOrderId(String toolName) {
+        return ToolNames.SHIPPING.equals(toolName) || ToolNames.COUPON.equals(toolName);
+    }
+
+    /** OrderTool 이 실제로 주문을 찾아냈는가? */
+    private boolean hasResolvedOrderId(AgentContext context) {
+        ToolResult orderResult = context.toolResult(ToolNames.ORDER);
+        return orderResult != null
+                && orderResult.isSuccess()
+                && orderResult.get("orderId") != null;
     }
 }

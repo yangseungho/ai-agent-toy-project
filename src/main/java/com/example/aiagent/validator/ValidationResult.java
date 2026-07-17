@@ -3,15 +3,14 @@ package com.example.aiagent.validator;
 import lombok.Getter;
 
 /**
- * Validation 결과.
+ * 검증 결과.
  */
 @Getter
 public class ValidationResult {
 
-    /** 통과 여부 */
     private final boolean valid;
 
-    /** 실패 사유 (통과 시 null) */
+    /** 실패 사유 (통과 시 null). Reflection 이 이 값을 교정 지시에 사용한다. */
     private final String reason;
 
     private ValidationResult(boolean valid, String reason) {

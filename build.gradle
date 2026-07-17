@@ -1,14 +1,13 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '3.3.5'
-    id 'io.spring.dependency-management' version '1.1.6'
+    id 'org.springframework.boot' version '3.5.16'
+    id 'io.spring.dependency-management' version '1.1.7'
 }
 
 group = 'com.example'
 version = '0.0.1-SNAPSHOT'
 
 java {
-    // 요구사항: Java 21 사용
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
     }
@@ -18,20 +17,47 @@ repositories {
     mavenCentral()
 }
 
+ext {
+    // Spring AI: VectorStore(pgvector) + Embedding 모델용으로만 사용한다.
+    springAiVersion = '1.1.8'
+    // Claude 호출은 Anthropic 공식 Java SDK 를 사용한다.
+    anthropicSdkVersion = '2.49.0'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.ai:spring-ai-bom:${springAiVersion}"
+    }
+}
+
 dependencies {
-    // REST API 및 Spring Boot 기본 기능
+    // --- Web / REST ---
     implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
 
-    // JSON 직렬화/역직렬화 (spring-boot-starter-web 에 이미 포함되어 있지만 명시)
-    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    // --- RDB (주문/쿠폰/대화이력) : PostgreSQL + JPA ---
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    runtimeOnly 'org.postgresql:postgresql'
 
-    // Lombok (보일러플레이트 감소)
-    compileOnly 'org.projectlombok:lombok:1.18.34'
-    annotationProcessor 'org.projectlombok:lombok:1.18.34'
-    testCompileOnly 'org.projectlombok:lombok:1.18.34'
-    testAnnotationProcessor 'org.projectlombok:lombok:1.18.34'
+    // --- Vector DB (RAG) : pgvector ---
+    // 같은 PostgreSQL 인스턴스를 RDB + Vector DB 로 함께 사용한다.
+    implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector'
 
-    // 테스트: JUnit5 + Mockito (spring-boot-starter-test 에 모두 포함)
+    // --- Embedding 모델 ---
+    // Claude(Anthropic)는 임베딩 모델을 제공하지 않으므로, 로컬에서 동작하는
+    // ONNX 기반 임베딩 모델(all-MiniLM-L6-v2, 384차원)을 사용한다. 추가 API Key 가 필요 없다.
+    implementation 'org.springframework.ai:spring-ai-starter-model-transformers'
+
+    // --- LLM : Anthropic Claude 공식 Java SDK ---
+    implementation "com.anthropic:anthropic-java:${anthropicSdkVersion}"
+
+    // --- Lombok ---
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    testCompileOnly 'org.projectlombok:lombok'
+    testAnnotationProcessor 'org.projectlombok:lombok'
+
+    // --- Test : 외부 인프라(LLM/DB/외부API)는 모두 Mockito 로 mocking ---
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

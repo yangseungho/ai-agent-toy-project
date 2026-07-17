@@ -1,0 +1,132 @@
+# ============================================================================
+#  AI Agent 설정
+#
+#  이 프로젝트가 연결하는 "외부 인프라"는 총 3가지이며 모두 여기서 설정한다.
+#
+#   1) PostgreSQL (+ pgvector 확장)
+#      - RDB   : 주문 / 쿠폰 / 대화이력(Memory) 저장
+#      - VectorDB : 정책 문서 임베딩 저장 및 유사도 검색(RAG)
+#      - 필요 준비:
+#          docker run -d --name agent-pg -p 5432:5432 \
+#            -e POSTGRES_DB=agent -e POSTGRES_USER=agent -e POSTGRES_PASSWORD=agent \
+#            pgvector/pgvector:pg16
+#        (pgvector 확장이 포함된 이미지를 사용해야 한다.
+#         일반 postgres 이미지라면 CREATE EXTENSION vector 가 실패한다.)
+#
+#   2) Anthropic Claude API (LLM)
+#      - Intent 분류 / 답변 생성 / Reflection 에 사용
+#      - ANTHROPIC_API_KEY 환경변수 필요
+#
+#   3) 외부 배송사 API (Shipping)
+#      - ShippingTool 이 RestClient 로 호출하는 외부 마이크로서비스
+#      - 실제 배송사/사내 배송 서비스 주소로 바꾸면 그대로 동작한다.
+# ============================================================================
+
+spring:
+  application:
+    name: ai-agent-reference
+
+  # --- 1) PostgreSQL (RDB) ---------------------------------------------------
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/agent}
+    username: ${DB_USERNAME:agent}
+    password: ${DB_PASSWORD:agent}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 3000
+
+  jpa:
+    hibernate:
+      # 학습용이므로 스키마 자동 생성. 실전에서는 validate + Flyway/Liquibase 사용을 권장한다.
+      ddl-auto: update
+    open-in-view: false
+    # Hibernate 가 테이블을 만든 뒤에 schema.sql / data.sql 을 실행한다.
+    # (false 면 테이블이 없는 상태에서 data.sql 이 먼저 돌아 INSERT 가 실패한다.)
+    defer-datasource-initialization: true
+    properties:
+      hibernate:
+        format_sql: true
+    show-sql: false
+
+  sql:
+    init:
+      # schema.sql(pgvector 확장) / data.sql(데모 데이터) 실행
+      mode: always
+
+  # --- 1-b) pgvector (Vector DB) --------------------------------------------
+  ai:
+    vectorstore:
+      pgvector:
+        # 애플리케이션 기동 시 벡터 테이블/인덱스를 자동 생성한다.
+        initialize-schema: true
+        # 임베딩 차원. 아래 embedding 모델(all-MiniLM-L6-v2)이 384차원이므로 반드시 384.
+        # 다른 임베딩 모델로 교체하면 이 값도 반드시 함께 바꿔야 한다.
+        dimensions: 384
+        # 코사인 거리 기반 유사도 검색
+        distance-type: COSINE_DISTANCE
+        index-type: HNSW
+        table-name: vector_store
+
+    # --- Embedding 모델 -----------------------------------------------------
+    # Claude(Anthropic)는 임베딩 모델을 제공하지 않는다.
+    # 그래서 임베딩만 로컬 ONNX 모델(all-MiniLM-L6-v2, 384차원)로 처리한다.
+    #   - 장점: 추가 API Key/비용 없음, 오프라인 동작
+    #   - 최초 기동 시 모델 파일을 1회 다운로드하여 캐시한다.
+    # 실전에서 관리형 임베딩 API로 바꾸려면 이 부분과 위의 dimensions 만 교체하면 된다.
+    embedding:
+      transformer:
+        onnx:
+          gpu-device-id: -1   # -1 = CPU 사용
+
+# --- 2) Anthropic Claude API --------------------------------------------------
+agent:
+  llm:
+    # 실제 API Key. 절대 코드/깃에 커밋하지 말 것.
+    api-key: ${ANTHROPIC_API_KEY:}
+    # 최신 모델. 모델 문자열은 정확히 이 값을 사용한다.
+    model: claude-opus-4-8
+    # 답변 생성용 최대 토큰 (adaptive thinking 토큰도 이 한도에 포함된다)
+    max-tokens: 16000
+    # 의도 분류는 짧은 구조화 출력이므로 별도로 작게 잡는다.
+    classification-max-tokens: 2048
+    # 호출 타임아웃
+    timeout: 120s
+
+  # --- 3) 외부 배송사 API -----------------------------------------------------
+  shipping-api:
+    # 실제 배송 조회 API 주소로 교체하면 그대로 동작한다.
+    base-url: ${SHIPPING_API_URL:http://localhost:9090}
+    api-key: ${SHIPPING_API_KEY:demo-shipping-key}
+    connect-timeout: 2s
+    read-timeout: 3s
+
+  # --- RAG 설정 ---------------------------------------------------------------
+  rag:
+    # 기동 시 정책 문서를 자동으로 임베딩/색인할지 여부.
+    # 운영에서는 보통 별도 배치/파이프라인에서 수행하므로 false 로 두고
+    # POST /api/admin/rag/ingest 로 수동 실행한다.
+    ingest-on-startup: true
+    # 유사도 검색 시 가져올 문서 수
+    top-k: 3
+    # 이 값보다 유사도가 낮은 문서는 버린다 (0.0 ~ 1.0)
+    similarity-threshold: 0.5
+
+  # --- Agent Loop 설정 ---------------------------------------------------------
+  loop:
+    # Planner 가 Tool 을 호출할 수 있는 최대 횟수 (무한루프 방지)
+    max-steps: 10
+    # Validation 실패 시 Reflection 재시도 횟수
+    max-reflection-retries: 1
+
+  # --- Memory 설정 -------------------------------------------------------------
+  memory:
+    # 프롬프트에 주입할 최근 대화 턴 수
+    max-history-messages: 10
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.example.aiagent: DEBUG

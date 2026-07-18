@@ -11,11 +11,14 @@ import com.example.aiagent.prompt.Prompt;
 import com.example.aiagent.prompt.PromptBuilder;
 import com.example.aiagent.reflection.ReflectionEngine;
 import com.example.aiagent.tool.Tool;
+import com.example.aiagent.tool.ToolExecutor;
 import com.example.aiagent.tool.ToolRegistry;
 import com.example.aiagent.tool.ToolResult;
 import com.example.aiagent.validator.ValidationResult;
 import com.example.aiagent.validator.Validator;
 import lombok.extern.slf4j.Slf4j;
+
+import java.util.List;
 
 /**
  * 모든 Workflow 가 공유하는 <b>Agent 실행 엔진</b>.
@@ -23,11 +26,11 @@ import lombok.extern.slf4j.Slf4j;
  * <p>AI Agent 의 핵심 루프가 여기 전부 들어 있다.</p>
  *
  * <pre>
- *  1) Planner 가 초기 계획 수립 (감지된 모든 의도의 Tool 합집합)
+ *  1) Planner 가 계획 수립 (감지된 모든 의도의 Tool 합집합) → Context 에 저장
  *  2) ── Agent Loop ──────────────────────────────
- *       Planner 에게 "다음에 뭘 할까?" 를 반복해서 물어본다.
- *       Tool 을 실행하고 결과를 컨텍스트에 쌓는다.
- *       Planner 가 결과를 보고 다음 행동을 다시 정한다.
+ *       Planner 에게 "지금 동시에 할 수 있는 일은?" 을 반복해서 물어본다.
+ *       돌아온 묶음(wave)을 병렬로 실행하고 결과를 컨텍스트에 쌓는다.
+ *       Planner 가 새 정보를 보고 다음 묶음을 다시 정한다.
  *       (Planner 는 한 번만 호출되지 않는다 — 이게 Agent 와 단순 파이프라인의 차이다.)
  *     ────────────────────────────────────────────
  *  3) PromptBuilder 가 수집한 근거로 Prompt 조립
@@ -42,6 +45,7 @@ public abstract class AbstractAgentWorkflow implements Workflow {
 
     private final Planner planner;
     private final ToolRegistry toolRegistry;
+    private final ToolExecutor toolExecutor;
     private final PromptBuilder promptBuilder;
     private final LlmClient llmClient;
     private final Validator validator;
@@ -50,6 +54,7 @@ public abstract class AbstractAgentWorkflow implements Workflow {
 
     protected AbstractAgentWorkflow(Planner planner,
                                     ToolRegistry toolRegistry,
+                                    ToolExecutor toolExecutor,
                                     PromptBuilder promptBuilder,
                                     LlmClient llmClient,
                                     Validator validator,
@@ -57,6 +62,7 @@ public abstract class AbstractAgentWorkflow implements Workflow {
                                     AgentProperties properties) {
         this.planner = planner;
         this.toolRegistry = toolRegistry;
+        this.toolExecutor = toolExecutor;
         this.promptBuilder = promptBuilder;
         this.llmClient = llmClient;
         this.validator = validator;
@@ -69,8 +75,9 @@ public abstract class AbstractAgentWorkflow implements Workflow {
         context.log("[Workflow] " + name() + " 시작 (intents=" + context.intents()
                 + ", primary=" + context.primaryIntent() + ")");
 
-        // 1) 초기 계획
+        // 1) 계획 수립 — 턴당 한 번. 이후 Loop 는 이 계획을 소비하며 진행한다.
         ExecutionPlan plan = planner.plan(context);
+        context.setPlan(plan);
         context.log("[Planner] 초기 계획\n" + plan.describe());
 
         // 2) Agent Loop
@@ -140,30 +147,48 @@ public abstract class AbstractAgentWorkflow implements Workflow {
     /**
      * Agent Loop.
      *
-     * <p>Planner 에게 반복해서 다음 행동을 묻고 Tool 을 실행한다.
-     * maxSteps 안전장치로 무한 루프를 막는다 — Planner 버그나 예상 못한 상태에서
-     * 루프가 돌면 LLM/외부 API 비용이 그대로 폭발하기 때문이다.</p>
+     * <p>Planner 에게 "지금 동시에 할 수 있는 일"을 묻고, 그 묶음을 병렬로 실행한 뒤,
+     * 새로 얻은 정보를 바탕으로 다시 묻는다. 이 반복이 Agent 와 고정 파이프라인의 차이다.</p>
+     *
+     * <p>maxSteps 안전장치로 무한 루프를 막는다 — Planner 버그나 예상 못한 상태에서
+     * 루프가 돌면 LLM/외부 API 비용이 그대로 폭발하기 때문이다. 이제는 wave 단위로 세므로
+     * 같은 Tool 개수를 훨씬 적은 반복으로 끝낸다.</p>
      */
     private void runAgentLoop(AgentContext context) {
-        int steps = 0;
+        int wave = 0;
 
-        while (steps < loopConfig.getMaxSteps()) {
-            PlanStep step = planner.decideNextStep(context);
+        while (wave < loopConfig.getMaxSteps()) {
+            List<PlanStep> batch = planner.nextBatch(context);
 
-            if (step.isFinish()) {
-                context.log("[Planner] 추가 Tool 불필요 → 답변 생성 단계로 (" + step.getReason() + ")");
+            if (batch.isEmpty()) {
+                context.log("[Planner] 추가 Tool 불필요 → 답변 생성 단계로");
+                context.log("[Planner] 최종 계획 상태\n" + context.getPlan().describe());
                 return;
             }
 
-            steps++;
-            context.log("[Planner] 다음 행동 → " + step.getToolName() + " 호출 (" + step.getReason() + ")");
+            wave++;
+            List<Tool> tools = batch.stream()
+                    .map(step -> toolRegistry.get(step.getToolName()))
+                    .toList();
+            List<String> toolNames = tools.stream().map(Tool::name).toList();
 
-            Tool tool = toolRegistry.get(step.getToolName());
-            ToolResult result = tool.execute(context);
-            context.addToolResult(result);
+            context.log("[Planner] wave " + wave + " → " + toolNames
+                    + (tools.size() > 1 ? " 병렬 실행" : " 실행"));
 
-            context.log("[Tool] " + step.getToolName()
-                    + (result.isSuccess() ? " 성공: " : " 실패: ") + result.getSummary());
+            long startedAt = System.currentTimeMillis();
+            List<ToolResult> results = toolExecutor.executeAll(tools, context);
+            long elapsed = System.currentTimeMillis() - startedAt;
+
+            // 결과 반영은 wave 가 모두 끝난 뒤 이 스레드에서 단독으로 한다.
+            // 덕분에 Tool 들은 실행 중 컨텍스트를 읽기만 하면 되고, 서로의 중간 상태를
+            // 볼 일이 없어 실행 결과가 스레드 타이밍에 따라 달라지지 않는다.
+            for (ToolResult result : results) {
+                context.addToolResult(result);
+                context.getPlan().markCompleted(result.getToolName());
+                context.log("[Tool] " + result.getToolName()
+                        + (result.isSuccess() ? " 성공: " : " 실패: ") + result.getSummary());
+            }
+            context.log("[Planner] wave " + wave + " 완료 (" + tools.size() + "개 Tool, " + elapsed + "ms)");
         }
 
         context.log("[Planner] 최대 실행 횟수(" + loopConfig.getMaxSteps() + ") 도달 → 루프 종료");

@@ -29,6 +29,7 @@ import com.example.aiagent.tool.OrderTool;
 import com.example.aiagent.tool.PolicyRagTool;
 import com.example.aiagent.tool.ShippingTool;
 import com.example.aiagent.tool.Tool;
+import com.example.aiagent.tool.ToolExecutor;
 import com.example.aiagent.tool.ToolNames;
 import com.example.aiagent.tool.ToolRegistry;
 import com.example.aiagent.validator.Validator;
@@ -106,16 +107,19 @@ class AgentPipelineEndToEndTest {
                 new CouponTool(couponRepository),
                 new PolicyRagTool(new PolicyRetriever(vectorStore, properties)));
 
-        Planner planner = new Planner();
         ToolRegistry registry = new ToolRegistry(tools);
+        Planner planner = new Planner(registry);
+        ToolExecutor toolExecutor = new ToolExecutor(properties);
         PromptBuilder promptBuilder = new PromptBuilder();
         Validator validator = new Validator();
         ReflectionEngine reflection = new ReflectionEngine(llmClient);
 
         CustomerSupportWorkflow supportWorkflow = new CustomerSupportWorkflow(
-                planner, registry, promptBuilder, llmClient, validator, reflection, properties);
+                planner, registry, toolExecutor, promptBuilder, llmClient,
+                validator, reflection, properties);
         PolicyQnaWorkflow policyWorkflow = new PolicyQnaWorkflow(
-                planner, registry, promptBuilder, llmClient, validator, reflection, properties);
+                planner, registry, toolExecutor, promptBuilder, llmClient,
+                validator, reflection, properties);
 
         RuleBasedRouter router = new RuleBasedRouter(supportWorkflow, policyWorkflow);
         IntentClassifier classifier = new IntentClassifier(llmClient);
@@ -178,10 +182,14 @@ class AgentPipelineEndToEndTest {
         // 2) 라우팅
         assertEquals("CustomerSupportWorkflow", response.getWorkflow());
 
-        // 3) Agent Loop: DB → 외부 API → DB → Vector DB 순서로 실행
-        assertEquals(
-                List.of(ToolNames.ORDER, ToolNames.SHIPPING, ToolNames.COUPON, ToolNames.POLICY_RAG),
-                response.getExecutedTools());
+        // 3) Agent Loop: DB / 외부 API / Vector DB 를 모두 거치되,
+        //    서로 독립적인 조회는 병렬로 묶이므로 실행 순서 전체를 고정하지는 않는다.
+        List<String> executed = response.getExecutedTools();
+        assertEquals(4, executed.size());
+        assertTrue(executed.containsAll(List.of(
+                ToolNames.ORDER, ToolNames.SHIPPING, ToolNames.COUPON, ToolNames.POLICY_RAG)));
+        assertTrue(executed.indexOf(ToolNames.ORDER) < executed.indexOf(ToolNames.SHIPPING));
+        assertTrue(executed.indexOf(ToolNames.ORDER) < executed.indexOf(ToolNames.COUPON));
 
         // 4) 검증 통과
         assertTrue(response.isValidationPassed());

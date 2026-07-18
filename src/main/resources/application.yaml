@@ -93,13 +93,32 @@ agent:
     # 호출 타임아웃
     timeout: 120s
 
-  # --- 3) 외부 배송사 API -----------------------------------------------------
+  # --- 3) 외부 배송사 API (로컬 폴백) -------------------------------------------
+  # 배송 조회는 MCP 서버로 옮겨가는 것이 기본 경로다(아래 mcp 설정 참고).
+  # 이 REST 클라이언트는 MCP 서버에 연결하지 못했을 때를 위한 폴백으로 남겨둔다.
   shipping-api:
-    # 실제 배송 조회 API 주소로 교체하면 그대로 동작한다.
     base-url: ${SHIPPING_API_URL:http://localhost:9090}
     api-key: ${SHIPPING_API_KEY:demo-shipping-key}
     connect-timeout: 2s
     read-timeout: 3s
+
+  # --- 4) MCP 서버 -------------------------------------------------------------
+  # 여기 서버를 추가하면 기동 시 tools/list 로 Tool 을 자동 발견해 등록한다.
+  # 코드를 고치거나 다시 배포하지 않고도 Agent 의 능력이 늘어난다.
+  #
+  # MCP 서버가 로컬 Tool 과 같은 이름의 Tool 을 노출하면 MCP 쪽이 우선한다.
+  # (예: 아래 shipping 서버가 "ShippingTool" 을 노출하면 로컬 ShippingTool 을 대체한다.)
+  #
+  # 서버에 연결하지 못해도 애플리케이션은 정상 기동하며, 해당 Tool 만 사용 불가가 된다.
+  mcp:
+    enabled: ${MCP_ENABLED:true}
+    protocol-version: "2025-06-18"
+    servers:
+      - name: shipping
+        url: ${MCP_SHIPPING_URL:http://localhost:9091/mcp}
+        api-key: ${MCP_SHIPPING_TOKEN:}
+        connect-timeout: 2s
+        read-timeout: 10s
 
   # --- RAG 설정 ---------------------------------------------------------------
   rag:
@@ -114,10 +133,17 @@ agent:
 
   # --- Agent Loop 설정 ---------------------------------------------------------
   loop:
-    # Planner 가 Tool 을 호출할 수 있는 최대 횟수 (무한루프 방지)
+    # wave 반복 최대 횟수 (무한루프 방지)
     max-steps: 10
     # Validation 실패 시 Reflection 재시도 횟수
     max-reflection-retries: 1
+    # 서로 의존하지 않는 Tool 을 가상 스레드로 동시에 실행한다.
+    # 예) OrderTool ∥ PolicyRagTool → ShippingTool ∥ CouponTool
+    #     외부 I/O 4회를 직렬로 기다리는 대신 2번의 대기로 끝난다.
+    # 디버깅 시 로그를 순서대로 읽고 싶으면 false 로 둔다.
+    parallel: true
+    # Tool 하나당 허용 시간. 초과하면 그 Tool 만 실패 처리하고 나머지 근거로 답변을 시도한다.
+    tool-timeout: 10s
 
   # --- Memory 설정 -------------------------------------------------------------
   memory:

@@ -5,6 +5,8 @@ import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * application.yaml 의 {@code agent.*} 설정을 타입 안전하게 바인딩한다.
@@ -19,6 +21,7 @@ public class AgentProperties {
 
     private Llm llm = new Llm();
     private ShippingApi shippingApi = new ShippingApi();
+    private Mcp mcp = new Mcp();
     private Rag rag = new Rag();
     private Loop loop = new Loop();
     private Memory memory = new Memory();
@@ -49,6 +52,36 @@ public class AgentProperties {
         private Duration readTimeout = Duration.ofSeconds(3);
     }
 
+    /**
+     * MCP(Model Context Protocol) 서버 연결 설정.
+     *
+     * <p>여기에 서버를 추가하면 그 서버가 노출하는 Tool 이 기동 시 자동으로 발견되어
+     * Agent 의 능력이 된다. <b>코드 변경 없이</b> Tool 을 늘릴 수 있다는 것이 핵심이다.</p>
+     */
+    @Getter
+    @Setter
+    public static class Mcp {
+        /** MCP 연동 자체를 끌 수 있다 (로컬 개발/테스트 편의) */
+        private boolean enabled = true;
+        /** 클라이언트가 지원한다고 선언할 MCP 프로토콜 버전 */
+        private String protocolVersion = "2025-06-18";
+        /** 연결할 MCP 서버 목록 */
+        private List<Server> servers = new ArrayList<>();
+
+        @Getter
+        @Setter
+        public static class Server {
+            /** 로그/추적용 서버 별칭 */
+            private String name;
+            /** MCP 엔드포인트 (Streamable HTTP 트랜스포트) */
+            private String url;
+            /** 필요 시 Authorization 헤더로 보낼 토큰 */
+            private String apiKey;
+            private Duration connectTimeout = Duration.ofSeconds(2);
+            private Duration readTimeout = Duration.ofSeconds(10);
+        }
+    }
+
     /** RAG(문서 검색) 설정 */
     @Getter
     @Setter
@@ -65,10 +98,20 @@ public class AgentProperties {
     @Getter
     @Setter
     public static class Loop {
-        /** Tool 호출 최대 횟수 (무한 루프 방지) */
+        /** wave 반복 최대 횟수 (무한 루프 방지) */
         private int maxSteps = 10;
         /** Validation 실패 시 Reflection 재시도 횟수 */
         private int maxReflectionRetries = 1;
+        /**
+         * 서로 독립적인 Tool 을 병렬 실행할지 여부.
+         * false 로 두면 순차 실행 — 디버깅 시 로그를 읽기 쉽게 만들 때 유용하다.
+         */
+        private boolean parallel = true;
+        /**
+         * Tool 하나당 허용 시간. 초과하면 그 Tool 만 실패 처리하고 나머지로 답변을 시도한다.
+         * Tool 내부 타임아웃(RestClient 등)과 별개로 Agent 가 거는 상한이다.
+         */
+        private Duration toolTimeout = Duration.ofSeconds(10);
     }
 
     /** 대화 이력(Memory) 설정 */

@@ -5,6 +5,7 @@ import com.example.aiagent.llm.LlmClient;
 import com.example.aiagent.planner.Planner;
 import com.example.aiagent.prompt.PromptBuilder;
 import com.example.aiagent.reflection.ReflectionEngine;
+import com.example.aiagent.tool.ToolExecutor;
 import com.example.aiagent.tool.ToolRegistry;
 import com.example.aiagent.validator.Validator;
 import org.springframework.stereotype.Component;
@@ -24,12 +25,14 @@ public class PolicyQnaWorkflow extends AbstractAgentWorkflow {
 
     public PolicyQnaWorkflow(Planner planner,
                              ToolRegistry toolRegistry,
+                             ToolExecutor toolExecutor,
                              PromptBuilder promptBuilder,
                              LlmClient llmClient,
                              Validator validator,
                              ReflectionEngine reflectionEngine,
                              AgentProperties properties) {
-        super(planner, toolRegistry, promptBuilder, llmClient, validator, reflectionEngine, properties);
+        super(planner, toolRegistry, toolExecutor, promptBuilder, llmClient,
+                validator, reflectionEngine, properties);
     }
 
     @Override

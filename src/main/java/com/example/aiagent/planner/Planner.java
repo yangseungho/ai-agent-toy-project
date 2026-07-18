@@ -2,49 +2,55 @@ package com.example.aiagent.planner;
 
 import com.example.aiagent.dto.AgentContext;
 import com.example.aiagent.intent.Intent;
+import com.example.aiagent.tool.Tool;
 import com.example.aiagent.tool.ToolNames;
-import com.example.aiagent.tool.ToolResult;
+import com.example.aiagent.tool.ToolRegistry;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 /**
- * Planner — 어떤 Tool 을 어떤 순서로 호출할지 결정한다.
- *
- * <p>핵심 두 가지.</p>
+ * Planner — 어떤 Tool 을 어떤 순서로, 무엇을 병렬로 호출할지 결정한다.
  *
  * <p><b>1) 복합 의도 처리</b><br>
- * 감지된 <b>모든</b> 의도에 필요한 Tool 을 합집합(union)으로 모은다.
+ * 감지된 모든 의도에 필요한 Tool 을 합집합(union)으로 모은다.
  * "취소하면 쿠폰 돌려받나요?" → intents=[ORDER_STATUS, SHIPPING, REFUND, COUPON]
- * → 주문/배송/쿠폰/정책을 모두 확인해야 정확히 답할 수 있다.</p>
+ * → 주문/배송/쿠폰/정책을 모두 확인해야 정확히 답할 수 있다.
+ * 이 계산은 <b>턴당 정확히 한 번</b>만 수행되어 {@link ExecutionPlan} 에 담긴다.</p>
  *
- * <p><b>2) 결과에 따른 적응</b><br>
- * Planner 는 한 번만 호출되지 않는다. Tool 결과를 받은 뒤 다시 호출되어
- * 다음 행동을 정한다({@link #decideNextStep}). 예를 들어 OrderTool 이 주문을
- * 찾지 못했다면 orderId 가 없으므로 ShippingTool/CouponTool 은 호출해봐야
- * 의미가 없다 → 건너뛰고 종료한다.</p>
+ * <p><b>2) 의존성 기반 병렬 실행</b><br>
+ * 실행 순서는 더 이상 Planner 안의 고정 목록이 아니라, 각 Tool 이 선언한
+ * {@link Tool#requiredInputs()} 에서 <b>도출</b>된다. 지금 당장 입력이 갖춰진 Tool 을
+ * 한 묶음(wave)으로 모아 동시에 실행하므로, 서로 무관한 조회가 직렬로 줄 서지 않는다.</p>
+ *
+ * <pre>
+ *   wave 1 : OrderTool ∥ PolicyRagTool     (아무 입력도 필요 없음)
+ *   wave 2 : ShippingTool ∥ CouponTool     (둘 다 orderId 만 필요 → 서로 독립)
+ * </pre>
+ * <p>순차 실행이면 외부 I/O 4번이 줄줄이 더해지지만, 이렇게 하면 2번의 대기로 끝난다.</p>
+ *
+ * <p><b>3) 결과에 따른 적응</b><br>
+ * wave 가 끝날 때마다 다시 판단한다. 어떤 Tool 도 실행 준비가 되지 않았고 진행할
+ * 방법도 없다면, 그 Tool 들을 계획에서 덜어낸다({@link ExecutionPlan#drop}).
+ * 예) 주문을 못 찾았으면 orderId 가 영원히 생기지 않으므로 배송/쿠폰 조회는 포기한다.</p>
  */
 @Component
 public class Planner {
 
-    /**
-     * Tool 호출 순서(고정).
-     *
-     * <p>OrderTool 이 반드시 먼저다. ShippingTool/CouponTool 은 OrderTool 이 찾아낸
-     * orderId 가 있어야 조회할 수 있기 때문이다 — Tool 간 데이터 의존성이 존재한다.</p>
-     */
-    private static final List<String> TOOL_ORDER = List.of(
-            ToolNames.ORDER,
-            ToolNames.SHIPPING,
-            ToolNames.COUPON,
-            ToolNames.POLICY_RAG
-    );
+    private final ToolRegistry toolRegistry;
+
+    public Planner(ToolRegistry toolRegistry) {
+        this.toolRegistry = toolRegistry;
+    }
 
     /**
      * 의도별로 필요한 Tool 을 합집합으로 계산한다.
+     *
+     * <p>실행 순서는 여기서 정하지 않는다 — 순서는 Tool 의 의존성 선언에서 나온다.</p>
      */
     public List<String> requiredTools(List<Intent> intents) {
         Set<String> required = new LinkedHashSet<>();
@@ -54,15 +60,7 @@ public class Planner {
                 required.addAll(toolsFor(intent));
             }
         }
-
-        // 정해진 실행 순서대로 정렬해 반환한다.
-        List<String> ordered = new ArrayList<>();
-        for (String toolName : TOOL_ORDER) {
-            if (required.contains(toolName)) {
-                ordered.add(toolName);
-            }
-        }
-        return ordered;
+        return new ArrayList<>(required);
     }
 
     /** 의도 하나가 필요로 하는 Tool 들. */
@@ -88,48 +86,62 @@ public class Planner {
         };
     }
 
-    /** 초기 실행 계획(청사진)을 세운다. */
+    /**
+     * 이번 턴의 계획을 세운다. 턴당 한 번만 호출된다.
+     */
     public ExecutionPlan plan(AgentContext context) {
-        ExecutionPlan executionPlan = new ExecutionPlan();
-
-        for (String toolName : requiredTools(context.intents())) {
-            executionPlan.addStep(PlanStep.callTool(toolName, "의도 " + context.intents() + " 처리에 필요"));
-        }
-        executionPlan.addStep(PlanStep.finish("수집한 근거로 답변 생성"));
-        return executionPlan;
+        return new ExecutionPlan(requiredTools(context.intents()));
     }
 
     /**
-     * Agent Loop 가 매 반복마다 호출한다. 지금까지 모인 결과를 보고 다음 행동을 결정한다.
+     * 지금 <b>동시에</b> 실행할 수 있는 Tool 묶음을 결정한다.
+     *
+     * <p>Agent Loop 가 wave 마다 호출한다. 반환이 비어 있으면 더 할 일이 없다는 뜻이다.</p>
      */
-    public PlanStep decideNextStep(AgentContext context) {
-        for (String toolName : requiredTools(context.intents())) {
+    public List<PlanStep> nextBatch(AgentContext context) {
+        ExecutionPlan plan = context.getPlan();
 
-            if (context.hasToolResult(toolName)) {
-                continue; // 이미 실행함
-            }
+        List<PlanStep> ready = new ArrayList<>();
+        List<String> blocked = new ArrayList<>();
+        Set<String> available = context.availableInputs();
 
-            // 결과 기반 적응: 주문을 못 찾았으면 주문에 종속된 Tool 은 건너뛴다.
-            if (requiresOrderId(toolName) && !hasResolvedOrderId(context)) {
+        for (String toolName : plan.pending()) {
+            Optional<Tool> found = toolRegistry.find(toolName);
+
+            if (found.isEmpty()) {
+                // MCP 서버가 죽어 원격 Tool 이 등록되지 않은 경우가 여기 걸린다.
+                // 대화를 실패시키지 않고, 그 정보 없이 답변을 시도한다.
+                plan.drop(toolName, "Tool 미등록 (MCP 서버 미연결 가능성)");
                 continue;
             }
 
-            return PlanStep.callTool(toolName, "아직 확인하지 않은 정보");
+            Set<String> missing = missingInputs(found.get(), available);
+            if (missing.isEmpty()) {
+                ready.add(PlanStep.callTool(toolName, "입력 조건 충족"));
+            } else {
+                blocked.add(toolName);
+            }
         }
 
-        return PlanStep.finish("필요한 정보를 모두 확인함");
+        if (!ready.isEmpty()) {
+            return ready;
+        }
+
+        // 실행 가능한 Tool 이 하나도 없는데 대기 중인 Tool 이 남아 있다.
+        // 이번 wave 가 끝난 시점이므로 새 입력이 생길 여지가 없다 → 영구 차단이다.
+        for (String toolName : blocked) {
+            Set<String> missing = toolRegistry.find(toolName)
+                    .map(tool -> missingInputs(tool, available))
+                    .orElseGet(Set::of);
+            plan.drop(toolName, "선행 정보 미확보: " + missing);
+        }
+        return List.of();
     }
 
-    /** 이 Tool 이 orderId 에 의존하는가? */
-    private boolean requiresOrderId(String toolName) {
-        return ToolNames.SHIPPING.equals(toolName) || ToolNames.COUPON.equals(toolName);
-    }
-
-    /** OrderTool 이 실제로 주문을 찾아냈는가? */
-    private boolean hasResolvedOrderId(AgentContext context) {
-        ToolResult orderResult = context.toolResult(ToolNames.ORDER);
-        return orderResult != null
-                && orderResult.isSuccess()
-                && orderResult.get("orderId") != null;
+    /** 이 Tool 이 요구하는 입력 중 아직 컨텍스트에 없는 것. */
+    private Set<String> missingInputs(Tool tool, Set<String> available) {
+        Set<String> missing = new LinkedHashSet<>(tool.requiredInputs());
+        missing.removeAll(available);
+        return missing;
     }
 }

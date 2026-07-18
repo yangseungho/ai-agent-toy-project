@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 쿠폰 조회 Tool — <b>PostgreSQL 을 JPA 로 실제 조회</b>한다.
@@ -36,14 +37,18 @@ public class CouponTool implements Tool {
         return "특정 주문에 사용된 쿠폰과 취소 시 복구 가능 여부를 DB에서 조회한다.";
     }
 
+    /** 쿠폰 조회에도 주문번호가 필요하다. ShippingTool 과 의존성이 같아 서로 병렬 실행된다. */
+    @Override
+    public Set<String> requiredInputs() {
+        return Set.of("orderId");
+    }
+
     @Override
     public ToolResult execute(ToolContext context) {
-        // 이전 Tool(OrderTool)의 결과에서 orderId 를 가져온다.
-        ToolResult orderResult = context.toolResult(ToolNames.ORDER);
-        if (orderResult == null || orderResult.get("orderId") == null) {
-            return ToolResult.failure(name(), "주문 정보가 없어 쿠폰을 조회할 수 없습니다. (OrderTool 선행 필요)");
+        String orderId = context.input("orderId");
+        if (orderId == null) {
+            return ToolResult.failure(name(), "주문 정보가 없어 쿠폰을 조회할 수 없습니다. (orderId 미확보)");
         }
-        String orderId = orderResult.get("orderId");
 
         try {
             List<CouponEntity> coupons = couponRepository.findByOrderId(orderId);

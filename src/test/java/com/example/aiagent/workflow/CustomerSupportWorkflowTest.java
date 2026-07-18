@@ -23,6 +23,7 @@ import com.example.aiagent.tool.OrderTool;
 import com.example.aiagent.tool.PolicyRagTool;
 import com.example.aiagent.tool.ShippingTool;
 import com.example.aiagent.tool.Tool;
+import com.example.aiagent.tool.ToolExecutor;
 import com.example.aiagent.tool.ToolNames;
 import com.example.aiagent.tool.ToolRegistry;
 import com.example.aiagent.validator.Validator;
@@ -80,9 +81,12 @@ class CustomerSupportWorkflowTest {
                 new CouponTool(couponRepository),
                 new PolicyRagTool(new PolicyRetriever(vectorStore, properties)));
 
+        ToolRegistry toolRegistry = new ToolRegistry(tools);
+
         workflow = new CustomerSupportWorkflow(
-                new Planner(),
-                new ToolRegistry(tools),
+                new Planner(toolRegistry),
+                toolRegistry,
+                new ToolExecutor(properties),
                 new PromptBuilder(),
                 llmClient,
                 new Validator(),
@@ -125,16 +129,41 @@ class CustomerSupportWorkflowTest {
     }
 
     @Test
-    @DisplayName("복합 질의는 4개 Tool 을 의존성 순서대로 실행한다")
-    void executesAllToolsInDependencyOrder() {
+    @DisplayName("복합 질의는 4개 Tool 을 모두 실행하되 의존성은 지킨다")
+    void executesAllToolsRespectingDependencies() {
         when(llmClient.complete(any(Prompt.class)))
                 .thenReturn("아직 배송이 시작되지 않아 취소 가능하며, 쿠폰은 복구됩니다.");
 
         AgentResponse response = workflow.execute(compositeContext());
+        List<String> executed = response.getExecutedTools();
 
-        assertEquals(
-                List.of(ToolNames.ORDER, ToolNames.SHIPPING, ToolNames.COUPON, ToolNames.POLICY_RAG),
-                response.getExecutedTools());
+        assertEquals(4, executed.size());
+        assertTrue(executed.containsAll(List.of(
+                ToolNames.ORDER, ToolNames.SHIPPING, ToolNames.COUPON, ToolNames.POLICY_RAG)));
+
+        // 실행 '순서'를 통째로 고정하지 않는다. 병렬 실행이므로 같은 wave 안의 순서에는
+        // 의미가 없기 때문이다. 대신 진짜 지켜야 하는 것 — 데이터 의존성 — 만 검증한다.
+        assertTrue(executed.indexOf(ToolNames.ORDER) < executed.indexOf(ToolNames.SHIPPING),
+                "배송 조회는 orderId 를 얻은 뒤에 실행되어야 한다");
+        assertTrue(executed.indexOf(ToolNames.ORDER) < executed.indexOf(ToolNames.COUPON),
+                "쿠폰 조회는 orderId 를 얻은 뒤에 실행되어야 한다");
+    }
+
+    @Test
+    @DisplayName("서로 독립인 Tool 은 같은 wave 로 묶여 2번의 wave 로 끝난다")
+    void executesIndependentToolsInParallelWaves() {
+        when(llmClient.complete(any(Prompt.class)))
+                .thenReturn("아직 배송이 시작되지 않았습니다.");
+
+        AgentResponse response = workflow.execute(compositeContext());
+        String trace = String.join("\n", response.getTrace());
+
+        // Tool 4개를 직렬로 돌면 wave 가 4번 필요하다. 의존성이 orderId 하나뿐이므로
+        // 실제로는 2번이면 충분하다 — 외부 I/O 대기가 절반으로 줄어든다는 뜻이다.
+        assertTrue(trace.contains("wave 1"), "첫 wave 가 있어야 한다");
+        assertTrue(trace.contains("wave 2"), "두 번째 wave 가 있어야 한다");
+        assertFalse(trace.contains("wave 3"), "3번째 wave 가 있으면 병렬 묶음이 실패한 것이다");
+        assertTrue(trace.contains("병렬 실행"), "병렬 실행이 추적 로그에 드러나야 한다");
     }
 
     @Test
@@ -194,7 +223,9 @@ class CustomerSupportWorkflowTest {
 
         AgentResponse response = workflow.execute(compositeContext());
 
-        assertEquals(List.of(ToolNames.ORDER, ToolNames.POLICY_RAG), response.getExecutedTools());
+        assertEquals(2, response.getExecutedTools().size());
+        assertTrue(response.getExecutedTools()
+                .containsAll(List.of(ToolNames.ORDER, ToolNames.POLICY_RAG)));
         // 주문이 없는데 배송 API 를 부르는 것은 낭비다.
         verify(shippingApiClient, org.mockito.Mockito.never()).findByOrderId(anyString());
     }

@@ -2,6 +2,7 @@ package com.example.aiagent.rag;
 
 import com.example.aiagent.config.AgentProperties;
 import com.example.aiagent.tool.PolicyRagTool;
+import com.example.aiagent.tool.StubToolContext;
 import com.example.aiagent.tool.ToolContext;
 import com.example.aiagent.tool.ToolResult;
 import org.junit.jupiter.api.DisplayName;
@@ -40,22 +41,7 @@ class PolicyRagToolTest {
     }
 
     private ToolContext context(String question) {
-        return new ToolContext() {
-            @Override
-            public String question() {
-                return question;
-            }
-
-            @Override
-            public String customerId() {
-                return "CUST-1";
-            }
-
-            @Override
-            public ToolResult toolResult(String toolName) {
-                return null;
-            }
-        };
+        return new StubToolContext(question, "CUST-1");
     }
 
     @Test

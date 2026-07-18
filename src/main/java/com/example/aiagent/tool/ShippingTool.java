@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 배송 조회 Tool — <b>외부 배송사 REST API 를 실제 호출</b>한다.
@@ -40,14 +41,19 @@ public class ShippingTool implements Tool {
         return "주문번호로 외부 배송사 API를 호출해 배송 상태와 운송장 정보를 조회한다.";
     }
 
+    /** 배송 조회에는 주문번호가 필요하다 → orderId 를 만들어내는 Tool 이 먼저 실행된다. */
+    @Override
+    public Set<String> requiredInputs() {
+        return Set.of("orderId");
+    }
+
     @Override
     public ToolResult execute(ToolContext context) {
-        // OrderTool 이 찾아낸 주문번호가 있어야 배송 조회가 가능하다.
-        ToolResult orderResult = context.toolResult(ToolNames.ORDER);
-        if (orderResult == null || orderResult.get("orderId") == null) {
-            return ToolResult.failure(name(), "주문 정보가 없어 배송을 조회할 수 없습니다. (OrderTool 선행 필요)");
+        // Planner 가 requiredInputs 를 보장하지만, 이 Tool 만 따로 호출될 수도 있으므로 방어한다.
+        String orderId = context.input("orderId");
+        if (orderId == null) {
+            return ToolResult.failure(name(), "주문 정보가 없어 배송을 조회할 수 없습니다. (orderId 미확보)");
         }
-        String orderId = orderResult.get("orderId");
 
         try {
             Optional<ShippingApiResponse> found = shippingApiClient.findByOrderId(orderId);
